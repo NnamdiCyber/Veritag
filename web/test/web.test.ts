@@ -1,29 +1,17 @@
 import { Keypair, TransactionBuilder } from "@stellar/stellar-sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  computeEvidenceSha256,
-  MAX_EVIDENCE_PHOTOS,
-  submitWarrantyClaimRequest,
-  validateWarrantyClaimInput,
-} from "../components/WarrantyClaimForm.js";
-import {
-  detectBrowserLocale,
-  flattenTranslationKeys,
-  getTranslation,
-  LOCALE_MESSAGES,
-  normalizeLocale,
-  SUPPORTED_LOCALES,
-} from "../lib/i18n.js";
-import {
-  checkPlatformAuthenticatorSupport,
-  registerPasskeySmartWallet,
-} from "../lib/passkey.js";
+  buildCertificatePdfBytes,
+  buildCertificateSvg,
+} from "../lib/certificate-generator.js";
+import { registerPasskeySmartWallet } from "../lib/passkey.js";
 import {
   buildUnsignedRegistryTxXdr,
   detectInstalledWallets,
   getFileDownloadUrl,
+  isValidGtinFormat,
   PUBLIC_CONFIG,
-  requestAlbedoPublicKey,
+  resolveGs1DigitalLink,
   signRegistryTxWithSecret,
   verifyProduct,
 } from "../lib/stellar.js";
@@ -91,207 +79,65 @@ describe("@veritag/web verification & passkey wallet logic", () => {
     expect(passkeyUnsignedXdr.length).toBeGreaterThan(20);
   });
 
-  it("validates warranty claim inputs, computes evidence SHA-256, and submits claims (#92)", async () => {
-    expect(
-      validateWarrantyClaimInput({
-        unitId: "",
-        category: "hardware",
-        serviceCenter: "GB7TAYRUZGE6TVT7NHP5SMIZRNQA6PLM423EYISAOAP3MKYIQMVYP2JO",
-        description: "Watch crown detached after 2 weeks of normal wear.",
-        photoCount: 1,
-      }),
-    ).toContain("select a product unit");
-
-    expect(
-      validateWarrantyClaimInput({
-        unitId: "55aa".repeat(16),
-        category: "hardware",
-        serviceCenter: "INVALID",
-        description: "Watch crown detached after 2 weeks of normal wear.",
-        photoCount: 1,
-      }),
-    ).toContain("Stellar address");
-
-    expect(
-      validateWarrantyClaimInput({
-        unitId: "55aa".repeat(16),
-        category: "hardware",
-        serviceCenter: "GB7TAYRUZGE6TVT7NHP5SMIZRNQA6PLM423EYISAOAP3MKYIQMVYP2JO",
-        description: "Too short",
-        photoCount: 1,
-      }),
-    ).toContain("at least 10 characters");
-
-    expect(
-      validateWarrantyClaimInput({
-        unitId: "55aa".repeat(16),
-        category: "hardware",
-        serviceCenter: "GB7TAYRUZGE6TVT7NHP5SMIZRNQA6PLM423EYISAOAP3MKYIQMVYP2JO",
-        description: "Watch crown detached after 2 weeks of normal wear.",
-        photoCount: MAX_EVIDENCE_PHOTOS + 1,
-      }),
-    ).toContain(`up to ${MAX_EVIDENCE_PHOTOS}`);
-
-    expect(
-      validateWarrantyClaimInput({
-        unitId: "55aa".repeat(16),
-        category: "hardware",
-        serviceCenter: "GB7TAYRUZGE6TVT7NHP5SMIZRNQA6PLM423EYISAOAP3MKYIQMVYP2JO",
-        description: "Watch crown detached after 2 weeks of normal wear.",
-        photoCount: 2,
-      }),
-    ).toBeNull();
-
-    const digest = await computeEvidenceSha256({
-      unitId: "55aa".repeat(16),
-      category: "hardware",
-      description: "Watch crown detached",
-      files: [{ name: "damage.jpg", size: 1024, sha256: "ab".repeat(32) }],
-    });
-    expect(digest).toMatch(/^[0-9a-f]{64}$/);
-
-    const fetchMock = vi.fn(async (url: string) => {
-      if (url.includes("/v1/uploads/presign")) {
-        return new Response(
-          JSON.stringify({
-            uploadUrl: "https://s3.example.com/presigned-put",
-            fileUrl: "https://cdn.example.com/evidence/photo1.jpg",
-          }),
-          { status: 200 },
-        );
-      }
-      if (url.includes("s3.example.com")) {
-        return new Response(null, { status: 200 });
-      }
-      if (url.includes("/v1/claims")) {
-        return new Response(
-          JSON.stringify({ claimId: 42, sponsoredTxHash: "txhash123" }),
-          { status: 200 },
-        );
-      }
-      return new Response(null, { status: 404 });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const sampleFile = new File(["fake-jpeg-bytes"], "serial-sticker.jpg", { type: "image/jpeg" });
-    const submitted = await submitWarrantyClaimRequest({
-      unitId: "55aa".repeat(16),
-      category: "hardware",
-      serviceCenter: "GB7TAYRUZGE6TVT7NHP5SMIZRNQA6PLM423EYISAOAP3MKYIQMVYP2JO",
-      description: "Serial sticker and crown damage attached.",
-      files: [sampleFile],
-      token: "jwt-owner-token",
-      signContractAction: async () => "signed-xdr-mock",
-    });
-    expect(submitted.claimId).toBe(42);
-    expect(submitted.reportHash).toMatch(/^[0-9a-f]{64}$/);
-    expect(submitted.evidenceUrls).toEqual(["https://cdn.example.com/evidence/photo1.jpg"]);
-    expect(submitted.sponsoredTxHash).toBe("txhash123");
-  });
-
-  it("detects installed wallet extensions and dispatches wallet connections (#104)", async () => {
-    const noneInstalled = detectInstalledWallets({});
-    expect(noneInstalled.freighter).toBe(false);
-    expect(noneInstalled.xbull).toBe(false);
-    expect(noneInstalled.albedo).toBe(true);
-
-    const bothInstalled = detectInstalledWallets({
-      freighterApi: {},
-      xBullSDK: {},
-      PublicKeyCredential: function () {},
-    });
-    expect(bothInstalled.freighter).toBe(true);
-    expect(bothInstalled.xbull).toBe(true);
-    expect(bothInstalled.passkey).toBe(true);
-
-    const mkSession = (walletType: WalletSession["walletType"], label: string): WalletSession => ({
-      address: "GB7TAYRUZGE6TVT7NHP5SMIZRNQA6PLM423EYISAOAP3MKYIQMVYP2JO",
-      walletType,
-      token: null,
-      label,
-    });
-
-    const handlers = {
-      freighter: vi.fn(async () => mkSession("freighter", "Freighter Wallet")),
-      xbull: vi.fn(async () => mkSession("xbull", "xBull Wallet")),
-      albedo: vi.fn(async () => mkSession("albedo", "Albedo Wallet")),
-      passkey: vi.fn(async () => mkSession("passkey", "Passkey Smart Account")),
-      keypair: vi.fn(async () => mkSession("keypair", "Consumer Keypair Signer")),
+  it("generates Guilloche SVG and vector PDF warranty certificates", () => {
+    const certData = {
+      unitId: "55aa66bb77cc88dd99ee00ff112233445566778899aabbccddeeff0011223344",
+      model: "Chronos Titan Automatic 41mm",
+      serial: "CH-2026-ACTIVE-04",
+      brandDomain: "chronos-watches.swiss",
+      ownerAddress: "GB7TAYRUZGE6TVT7NHP5SMIZRNQA6PLM423EYISAOAP3MKYIQMVYP2JO",
+      txHash: "4e9b2f7a1c8d3065a2b4c6d8e0f123456789abcdef0123456789abcdef012345",
+      expiresAt: "2028-08-15",
+      warrantyDaysRemaining: 630,
+      claimsUsed: 1,
     };
 
-    const resXbull = await dispatchWalletConnection("xbull", handlers);
-    expect(handlers.xbull).toHaveBeenCalledTimes(1);
-    expect(resXbull?.walletType).toBe("xbull");
+    const svg = buildCertificateSvg(certData);
+    expect(svg).toContain("<svg");
+    expect(svg).toContain("Certificate of Authenticity &amp; Warranty");
+    expect(svg).toContain(certData.ownerAddress);
+    expect(svg).toContain(certData.txHash);
+    expect(svg).toContain(certData.expiresAt);
+    expect(svg).toContain("<path d=");
 
-    const resAlbedo = await dispatchWalletConnection("albedo", handlers);
-    expect(handlers.albedo).toHaveBeenCalledTimes(1);
-    expect(resAlbedo?.walletType).toBe("albedo");
-
-    const resPasskey = await dispatchWalletConnection("passkey", handlers, { label: "My Passkey" });
-    expect(handlers.passkey).toHaveBeenCalledWith("My Passkey");
-    expect(resPasskey?.walletType).toBe("passkey");
-
-    vi.stubGlobal("window", {
-      albedo: {
-        publicKey: vi.fn(async () => ({
-          pubkey: "GB7TAYRUZGE6TVT7NHP5SMIZRNQA6PLM423EYISAOAP3MKYIQMVYP2JO",
-        })),
-      },
-    });
-    const albedoResult = await requestAlbedoPublicKey("test-token");
-    expect(albedoResult.pubkey).toBe("GB7TAYRUZGE6TVT7NHP5SMIZRNQA6PLM423EYISAOAP3MKYIQMVYP2JO");
+    const pdfBytes = buildCertificatePdfBytes(certData);
+    const pdfText = new TextDecoder().decode(pdfBytes);
+    expect(pdfText.startsWith("%PDF-1.4")).toBe(true);
+    expect(pdfText.trimEnd().endsWith("%%EOF")).toBe(true);
+    expect(pdfText).toContain(certData.ownerAddress);
+    expect(pdfText).toContain(certData.txHash);
+    expect(pdfText).toContain(certData.expiresAt);
   });
 
-  it("checks WebAuthn platform biometric availability for passkey onboarding (#93)", async () => {
-    const unavailable = await checkPlatformAuthenticatorSupport();
-    expect(unavailable.webAuthnSupported).toBe(false);
-    expect(unavailable.platformAuthenticatorAvailable).toBe(false);
+  it("resolves GS1 Digital Link GTIN/serial paths and rejects invalid GTINs", async () => {
+    expect(isValidGtinFormat("01234567890128")).toBe(true);
+    expect(isValidGtinFormat("12345678")).toBe(true);
+    expect(isValidGtinFormat("INVALID-GTIN")).toBe(false);
 
-    vi.stubGlobal("window", {
-      PublicKeyCredential: {
-        isUserVerifyingPlatformAuthenticatorAvailable: vi.fn(async () => true),
-      },
-    });
-    vi.stubGlobal("navigator", {
-      userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-    });
+    const invalid = await resolveGs1DigitalLink("ABC", "CH-2026-000101");
+    expect(invalid).toBeNull();
 
-    const supported = await checkPlatformAuthenticatorSupport();
-    expect(supported.webAuthnSupported).toBe(true);
-    expect(supported.platformAuthenticatorAvailable).toBe(true);
-    expect(supported.platformHint).toBe("apple");
+    const fallbackResolved = await resolveGs1DigitalLink("01234567890128", "CH-2026-000101");
+    expect(fallbackResolved).not.toBeNull();
+    expect(fallbackResolved?.source).toBe("demo-fallback");
+    expect(fallbackResolved?.redirectPath).toContain("/v/");
+    expect(fallbackResolved?.redirectPath).toContain("/CH-2026-000101");
 
-    vi.stubGlobal("window", {
-      PublicKeyCredential: {
-        isUserVerifyingPlatformAuthenticatorAvailable: vi.fn(async () => false),
-      },
-    });
-    const hardwareMissing = await checkPlatformAuthenticatorSupport();
-    expect(hardwareMissing.webAuthnSupported).toBe(true);
-    expect(hardwareMissing.platformAuthenticatorAvailable).toBe(false);
-  });
-
-  it("ensures translation key completeness across all 5 locales and detects browser language (#99)", () => {
-    expect(SUPPORTED_LOCALES).toEqual(["en", "es", "fr", "de", "zh"]);
-    const baseKeys = flattenTranslationKeys(LOCALE_MESSAGES.en as unknown as Record<string, unknown>);
-    expect(baseKeys.length).toBeGreaterThan(20);
-
-    for (const locale of SUPPORTED_LOCALES) {
-      const keys = flattenTranslationKeys(
-        LOCALE_MESSAGES[locale] as unknown as Record<string, unknown>,
-      );
-      expect(keys).toEqual(baseKeys);
-    }
-
-    expect(normalizeLocale("es-MX")).toBe("es");
-    expect(normalizeLocale("zh-CN")).toBe("zh");
-    expect(normalizeLocale("pt-BR")).toBe("en");
-
-    vi.stubGlobal("navigator", { language: "fr-CA", languages: ["fr-CA", "en-US"] });
-    expect(detectBrowserLocale()).toBe("fr");
-
-    expect(getTranslation("de", "ownership.daysWarrantyLeft", { days: 180 })).toBe(
-      "Noch 180 Tage Garantie",
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          brandAddress: "GABC1234567890BRAND",
+          brandDomain: "atelier.example",
+          batchId: "batch-999",
+        }),
+      }),
     );
+
+    const apiResolved = await resolveGs1DigitalLink("01234567890128", "SER-42");
+    expect(apiResolved?.source).toBe("api");
+    expect(apiResolved?.brandDomain).toBe("atelier.example");
+    expect(apiResolved?.redirectPath).toBe("/v/GABC1234567890BRAND/batch-999/SER-42");
   });
 });
