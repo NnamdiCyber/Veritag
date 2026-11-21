@@ -347,3 +347,81 @@ export async function fetchUnitTimeline(unitId: string): Promise<{
 export function getFileDownloadUrl(hash: string): string {
   return `${PUBLIC_CONFIG.apiUrl}/v1/files/${encodeURIComponent(hash)}`;
 }
+
+export interface InstalledWalletsStatus {
+  freighter: boolean;
+  xbull: boolean;
+  albedo: boolean;
+  passkey: boolean;
+}
+
+/**
+ * Detects which Stellar wallet browser extensions and platform capabilities are available.
+ */
+export function detectInstalledWallets(
+  win?: Record<string, unknown>,
+): InstalledWalletsStatus {
+  const target =
+    win ?? (typeof window !== "undefined" ? (window as unknown as Record<string, unknown>) : undefined);
+  if (!target) {
+    return { freighter: false, xbull: false, albedo: true, passkey: false };
+  }
+  return {
+    freighter: Boolean(target.freighterApi || target.freighter),
+    xbull: Boolean(target.xBullSDK || target.xbull),
+    albedo: true,
+    passkey: Boolean(target.PublicKeyCredential),
+  };
+}
+
+interface AlbedoIntentApi {
+  publicKey: (params?: { token?: string }) => Promise<{ pubkey: string; signed_message?: string }>;
+  tx: (params: { xdr: string; network?: string; submit?: boolean }) => Promise<{ signed_envelope_xdr: string }>;
+}
+
+async function loadAlbedoIntent(): Promise<AlbedoIntentApi> {
+  if (typeof window !== "undefined") {
+    const winAlbedo = (window as unknown as { albedo?: AlbedoIntentApi }).albedo;
+    if (winAlbedo?.publicKey) {
+      return winAlbedo;
+    }
+  }
+  const pkgName = "@albedo-link/intent";
+  const mod = (await import(/* webpackIgnore: true */ pkgName)) as {
+    default?: AlbedoIntentApi;
+  } & Partial<AlbedoIntentApi>;
+  const resolved = mod.default ?? (mod as AlbedoIntentApi);
+  if (!resolved?.publicKey) {
+    throw new Error("Albedo intent SDK could not be loaded");
+  }
+  return resolved;
+}
+
+/**
+ * Requests public key login via Albedo zero-install browser popup (`@albedo-link/intent`).
+ */
+export async function requestAlbedoPublicKey(
+  token?: string,
+): Promise<{ pubkey: string; signedMessage?: string }> {
+  const albedo = await loadAlbedoIntent();
+  const res = await albedo.publicKey(token ? { token } : {});
+  if (!res?.pubkey) {
+    throw new Error("Albedo did not return a public key");
+  }
+  return { pubkey: res.pubkey, signedMessage: res.signed_message };
+}
+
+/**
+ * Signs a Stellar/Soroban transaction XDR via Albedo popup (`@albedo-link/intent`).
+ */
+export async function signTxWithAlbedo(
+  xdrString: string,
+  network: "testnet" | "public" = "testnet",
+): Promise<string> {
+  const albedo = await loadAlbedoIntent();
+  const res = await albedo.tx({ xdr: xdrString, network, submit: false });
+  if (!res?.signed_envelope_xdr) {
+    throw new Error("Albedo did not return a signed transaction XDR");
+  }
+  return res.signed_envelope_xdr;
+}

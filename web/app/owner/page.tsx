@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { PasskeyOnboardingModal } from "@/components/PasskeyOnboardingModal";
+import { WarrantyClaimForm } from "@/components/WarrantyClaimForm";
 import { PUBLIC_CONFIG } from "@/lib/stellar";
 import { useWallet } from "@/lib/wallet-context";
 
@@ -32,6 +34,7 @@ export default function OwnerPortalPage() {
   const [redeemCode, setRedeemCode] = useState("");
   const [serviceCenterAddr, setServiceCenterAddr] = useState("");
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [passkeyOnboardingOpen, setPasskeyOnboardingOpen] = useState(false);
 
   const loadOwnerUnits = useCallback(async (address: string, token: string) => {
     try {
@@ -218,12 +221,18 @@ export default function OwnerPortalPage() {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => void handleConnectPasskey()}
+            onClick={() => {
+              if (session) {
+                void handleConnectPasskey();
+              } else {
+                setPasskeyOnboardingOpen(true);
+              }
+            }}
             className="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
           >
             {session
               ? `${session.label}: ${session.address.slice(0, 8)}...`
-              : "Sign in with Passkey (WebAuthn)"}
+              : "Create Passkey Wallet"}
           </button>
           {!session && (
             <button
@@ -340,6 +349,24 @@ export default function OwnerPortalPage() {
           </button>
         </form>
       </div>
+
+      <WarrantyClaimForm
+        units={products}
+        defaultServiceCenter={serviceCenterAddr}
+        onClaimSubmitted={(result) =>
+          setFeedback(
+            `Warranty claim #${result.claimId} submitted (Evidence SHA-256: ${result.reportHash.slice(0, 12)}...).`,
+          )
+        }
+      />
+
+      <PasskeyOnboardingModal
+        open={passkeyOnboardingOpen}
+        onClose={() => setPasskeyOnboardingOpen(false)}
+        onSuccess={(address) =>
+          setFeedback(`Connected passkey smart wallet ${address.slice(0, 12)}...`)
+        }
+      />
     </div>
   );
 }
